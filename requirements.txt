@@ -1,0 +1,3 @@
+# Only the SDK of the provider you actually use is required.
+anthropic>=0.40.0     # LLM_PROVIDER=anthropic (default)
+openai>=1.40.0        # LLM_PROVIDER=openai (also any OpenAI-compatible endpoint via OPENAI_BASE_URL)
