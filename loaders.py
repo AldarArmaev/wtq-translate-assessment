@@ -116,9 +116,7 @@ def load_table(path: Path, tsv_quoting: str = "none") -> Table:
 
 def resolve_source_table(root: Path, source_context: str) -> Path:
     p = root / source_context
-    if p.is_file():
-        return p
     alt = p.with_suffix(".tsv")
     if alt.is_file():
         return alt
-    raise FileNotFoundError(f"source table not found: {p}")
+    raise FileNotFoundError(f"TSV table not found: {p}")

@@ -43,7 +43,7 @@ class Config:
     model: str = ""
     temperature: float = 0.0
     max_retries: int = 4
-    timeout: float = 120.0
+    timeout: float = 300.0
     tsv_quoting: str = "none"     # none | minimal  (how dataset/table TSVs are quoted)
     ids_file: Optional[Path] = None
     resume: bool = False
