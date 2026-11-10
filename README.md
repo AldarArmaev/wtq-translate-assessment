@@ -1,5 +1,14 @@
 # WTQ en→ru translation quality baseline
 
+## Evaluation v2
+
+See [ENTITY_EVALUATION.md](ENTITY_EVALUATION.md) for the new pipeline and entity metrics.
+All cells are evaluated by default (`--max-cells 0`). Mentions are judged only by
+`question_text` and trace `translated_text`. A separate Stanza + multilingual GLiNER
+stage extracts 18 entity types from questions and cells; Python compares detected types
+after LLM alignment, while the LLM checks meaning. Initial model downloads are required.
+Use `--workers 1` and a new output directory for per-example runtime benchmarking.
+
 ```bash
 cd wtq/evaluation
 pip install -r requirements.txt

@@ -15,6 +15,8 @@ import json
 import os
 import sys
 import traceback
+import time
+import entities as E
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
@@ -70,6 +72,7 @@ def _mention_section(client, trace, src_q, tr_q, src_tab, tr_tab, cells_by_coord
 
 
 def evaluate_example(ex_id: str, ds: dict, cfg: Config, client) -> dict:
+    example_started = time.perf_counter()
     ex = ds[ex_id]
     trace = load_trace(cfg.trace_dir / f"{ex_id}.json")
     quality = trace.get("quality") or {}
@@ -104,6 +107,24 @@ def evaluate_example(ex_id: str, ds: dict, cfg: Config, client) -> dict:
     except Exception as e:  # noqa: BLE001
         rec["section_errors"]["mentions"] = repr(e)
 
+    # Independent entity stage, covering the question and every selected cell.
+    if getattr(cfg, '_extractor', None) is not None and (cfg.entity_scope == 'question' or rec['table'] is not None):
+        try:
+            entity_started = time.perf_counter()
+            entity_target = tr_q
+            target_lang = 'ru'
+            if cfg.entity_comparison == 'back':
+                entity_target = quality.get('back_translated_question')
+                if not isinstance(entity_target, str) or not entity_target.strip():
+                    raise ValueError('Missing quality.back_translated_question')
+                target_lang = 'en'
+            entity_cells = [] if cfg.entity_scope == 'question' else rec['table']['cells']
+            rec['entities'] = E.evaluate(cfg._extractor, client, src_q, entity_target, entity_cells,
+                                         target_lang=target_lang)
+            rec['entity_seconds'] = time.perf_counter() - entity_started
+        except Exception as e:
+            rec['section_errors']['entities'] = repr(e)
+
     # ---- question (Q1-Q4 + critical error)
     q = {"source": src_q, "translation": tr_q, "meaning_preserved": None, "key_elements_correct": None,
          "logic_preserved": None, "russian_naturalness": None, "critical_error": None,
@@ -124,8 +145,11 @@ def evaluate_example(ex_id: str, ds: dict, cfg: Config, client) -> dict:
     items = (rec["mentions"] or {}).get("items") or []
     leak = "<TABLE_REF" in tr_q
     if rec["mentions"] is not None:
-        q["critical_error_from_mentions"] = int(leak or rec["mentions"]["preservation"] == 0
-                                                or any(i["correctness"] == 0 for i in items))
+        if leak or rec["mentions"]["preservation"] == 0 or any(i["correctness"] == 0 for i in items):
+            q["critical_error_from_mentions"] = 1
+        elif all(i["correctness"] is not None for i in items) and (
+                not raw_mentions or rec["mentions"]["preservation"] == 1):
+            q["critical_error_from_mentions"] = 0
     linked = M.linked_coordinates(raw_mentions)
     if rec["table"] is not None:
         q["critical_error_from_table"] = int(any(
@@ -139,6 +163,7 @@ def evaluate_example(ex_id: str, ds: dict, cfg: Config, client) -> dict:
     elif all(t == 0 for t in triggers):
         q["critical_error"] = 0
     rec["question"] = q
+    rec["elapsed_seconds"] = time.perf_counter() - example_started
     return rec
 
 
@@ -163,6 +188,7 @@ def _write_jsonl(path: Path, rows: list) -> None:
 
 
 def run(cfg: Config, client=None) -> dict:
+    run_started = time.perf_counter()
     out = cfg.out_dir
     out.mkdir(parents=True, exist_ok=True)
     eval_path, err_path = out / "evaluation.jsonl", out / "errors.jsonl"
@@ -217,6 +243,11 @@ def run(cfg: Config, client=None) -> dict:
             "n_sampled": len(ids), "n_evaluated": len(records), "n_failed_examples": len(failures),
             "n_with_section_errors": sum(1 for r in records if r.get("section_errors")),
             "max_cells_per_table": cfg.max_cells,
+            "entity_backend": cfg.entity_backend, "entity_scope": cfg.entity_scope,
+            "entity_comparison": cfg.entity_comparison,
+            "elapsed_seconds": time.perf_counter() - run_started,
+            "mean_example_seconds": sum(r.get("elapsed_seconds", 0) for r in records) / len(records) if records else None,
+            "entity_setup_seconds": getattr(getattr(cfg, "_extractor", None), "setup_seconds", None),
             "created_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
     summary = metrics.summarize(records, meta)
     (out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -240,8 +271,12 @@ def parse_args(argv: Optional[list] = None) -> Config:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--ids-file", type=Path, help="evaluate exactly these ids (one per line) instead of sampling")
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--max-cells", type=int, default=150, help="max cells judged per table (0 = no cap)")
+    ap.add_argument("--max-cells", type=int, default=0, help="max cells judged per table (0 = no cap)")
     ap.add_argument("--cell-batch-size", type=int, default=40)
+    ap.add_argument("--entity-model-dir", type=Path, default=HERE / ".models")
+    ap.add_argument('--entity-backend', choices=['gliner', 'stanza-ontonotes'], default='gliner')
+    ap.add_argument('--entity-scope', choices=['all', 'question'], default='all')
+    ap.add_argument('--entity-comparison', choices=['forward', 'back'], default='forward')
     ap.add_argument("--provider", choices=["anthropic", "openai"], default=os.environ.get("LLM_PROVIDER", "anthropic"))
     ap.add_argument("--model", default=os.environ.get("LLM_MODEL", ""))
     ap.add_argument("--temperature", type=float, default=0.0)
@@ -251,6 +286,10 @@ def parse_args(argv: Optional[list] = None) -> Config:
     ap.add_argument("--force", action="store_true", help="overwrite existing results")
     ap.add_argument("--aggregate-only", action="store_true", help="re-aggregate output/evaluation.jsonl and exit")
     a = ap.parse_args(argv)
+    if a.entity_comparison == 'back' and a.entity_scope != 'question':
+        ap.error('Back-translation entities require --entity-scope question (no back-translated cells)')
+    if a.entity_backend == 'stanza-ontonotes' and a.entity_comparison != 'back':
+        ap.error('English OntoNotes requires --entity-comparison back')
 
     if a.aggregate_only:
         recs = _read_jsonl(a.out_dir / "evaluation.jsonl")
@@ -264,6 +303,9 @@ def parse_args(argv: Optional[list] = None) -> Config:
                   sample_size=a.sample_size, seed=a.seed, workers=a.workers, max_cells=a.max_cells,
                   cell_batch_size=a.cell_batch_size, use_llm=not a.no_llm, provider=a.provider, model=a.model,
                   temperature=a.temperature, tsv_quoting=a.tsv_quoting, ids_file=a.ids_file,
+                  entity_model_dir=a.entity_model_dir.resolve(),
+                  entity_backend=a.entity_backend, entity_scope=a.entity_scope,
+                  entity_comparison=a.entity_comparison,
                   resume=a.resume, force=a.force)
 
 
@@ -273,6 +315,11 @@ def main(argv: Optional[list] = None) -> None:
     client = J.LLMClient(cfg, cfg.out_dir / "cache") if cfg.use_llm else None
     if client is None:
         print("WARNING: --no-llm, semantic metrics will be empty", file=sys.stderr)
+    if cfg.entity_backend == 'stanza-ontonotes':
+        from stanza_entities import StanzaEntityExtractor
+        cfg._extractor = StanzaEntityExtractor(cfg.entity_model_dir)
+    else:
+        cfg._extractor = E.EntityExtractor(cfg.entity_model_dir)
     run(cfg, client)
 
 

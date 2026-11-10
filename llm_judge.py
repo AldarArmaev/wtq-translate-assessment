@@ -90,30 +90,12 @@ Return ONLY a JSON object (no markdown):
 {"results": [{"i": <id>, "correct": 0 or 1, "information_preserved": 0 or 1, "no_added_information": 0 or 1, "note": "<short reason if any verdict is 0, otherwise empty string>"}, ...]}
 Include exactly one result per input cell."""
 
-SYSTEM_MENTIONS = """You are an expert English-Russian translation reviewer. In the WikiTableQuestions dataset a question mentions elements of a table (column headers or cell values). Both the question and the table were translated from English to Russian. You check whether each table mention survived the translation correctly.
+SYSTEM_MENTIONS = """You are an English-Russian translation reviewer. Evaluate ONLY each source_mention and translated_text pair from a translation trace. Ignore table coordinates, table texts and other mentions. Inflection, case, number required by Russian grammar and harmless paraphrases are allowed. Do not require a short mention to express an entire table header. Return ONLY JSON: {"results": [{"id": "mention id", "correctness": 0 or 1, "note": "short reason or empty"}]}. correctness=1 means the translated_text faithfully conveys source_mention; 0 means missing, mistranslated, distorted or invented meaning. Include every input id exactly once."""
 
-Input is a JSON object with:
-- "source_question" and "translated_question";
-- "mentions": a list; each mention has "id", "source_mention" (the wording in the English question), "source_element_type" ("header" = column header, "cell" = cell value), "source_table_text" (the English header/cell the mention refers to), "translated_table_text" (its translation in the Russian table) and optionally "other_translated_table_texts" (translations of other cells holding the same English value).
-
-For every mention produce:
-
-1. span: copy, character by character, the shortest contiguous fragment of "translated_question" that renders "source_mention" in Russian (keep the inflected form used in the question). Include only words that translate words of source_mention; do not include extra neighbouring words. If the translated question has no counterpart of the mention, use "".
-
-2. correctness (chain check): source_mention -> source_table_text -> translated_table_text -> span.
-   1 = the span refers to the same table element (same entity / value / column) as the English mention, AND translated_table_text is a correct translation of source_table_text.
-   0 = the span is missing, or refers to a different entity/value/column, or translated_table_text is not a correct translation of source_table_text.
-
-3. semantic_consistency: compare ONLY the span with translated_table_text (the Russian side).
-   1 = they mean the same thing, even if the form differs: inflection/case, word order, capitalisation, transliteration variant, abbreviation vs full form, a harmless generic word added or dropped. Example: table "Премьер-лига" and span "в английской Премьер-лиге" are consistent.
-   0 = they denote different entities/values/columns or different meanings, or there is no span.
-
-Return ONLY a JSON object (no markdown):
-{"results": [{"id": "<mention id>", "span": "<fragment or empty string>", "correctness": 0 or 1, "semantic_consistency": 0 or 1, "note": "<short reason if any verdict is 0, otherwise empty string>"}, ...]}
-Include exactly one result per input mention."""
+SYSTEM_ENTITIES = """You are a named-entity preservation reviewer. Compare an English original with a candidate that is either its Russian translation or its English back-translation. Each item has source and translation text and ordered lists of entity strings. List indices are zero-based IDs. Align each source entity with the corresponding target entity in the SAME item by identity/meaning, not by position. Each target ID can be used at most once. For a source entity with no detected counterpart use target_id=null and meaning_preserved=0. Do not invent entities or IDs. Judge whether the aligned entity preserves the original identity/value; transliteration and inflection are allowed. Do not assign entity types: Python compares independently detected types. Unused target IDs must be listed as added_target_ids (unmatched detections, not necessarily translation hallucinations). Return ONLY JSON: {"results": [{"i": 0, "matches": [{"source_id": 0, "target_id": 0, "meaning_preserved": 1, "note": ""}], "added_target_ids": []}]}. Include each item and source entity exactly once. Empty source lists require matches=[]."""
 
 RUBRIC_HASH = hashlib.sha256(
-    "\x00".join([SYSTEM_QUESTION, QUESTION_USER, SYSTEM_CELLS, SYSTEM_MENTIONS]).encode("utf-8")
+    "\x00".join([SYSTEM_QUESTION, QUESTION_USER, SYSTEM_CELLS, SYSTEM_MENTIONS, SYSTEM_ENTITIES]).encode("utf-8")
 ).hexdigest()[:12]
 
 
@@ -175,7 +157,7 @@ def _parse_cells(obj: dict, ids: list) -> dict:
 
 
 def _parse_mentions(obj: dict, ids: list) -> dict:
-    return _parse_results(obj, ids, "id", ("correctness", "semantic_consistency"))
+    return _parse_results(obj, ids, "id", ("correctness",))
 
 
 # ============================================================================= client
@@ -320,6 +302,33 @@ def judge_cells(client, items: list, domain: Optional[str], batch_size: int = 40
 
 def judge_mentions(client, source_question: str, translated_question: str, items: list, batch_size: int = 25) -> dict:
     """items: mention payloads with string ids -> {id: verdict | None}"""
-    return _judge_batches(client, SYSTEM_MENTIONS, items, "id", _parse_mentions,
-                          {"source_question": source_question, "translated_question": translated_question},
-                          batch_size)
+    return _judge_batches(client, SYSTEM_MENTIONS, items, "id", _parse_mentions, {}, batch_size)
+
+
+def judge_entities(client, items, batch_size=20):
+    def parse(obj, ids):
+        raw = obj.get('results', [])
+        if len(raw) != len(ids) or {r.get('i') for r in raw} != set(ids):
+            raise ValueError('entity item IDs mismatch')
+        out = {}
+        for r in raw:
+            task = items[r['i']]
+            matches = r.get('matches', [])
+            if len(matches) != len(task['source_entities']) or {m.get('source_id') for m in matches} != set(range(len(task['source_entities']))):
+                raise ValueError('source entity IDs mismatch')
+            used = []
+            for m in matches:
+                dest = m.get('target_id')
+                if dest is not None:
+                    if type(dest) is not int or not 0 <= dest < len(task['translation_entities']):
+                        raise ValueError('target entity ID out of bounds')
+                    used.append(dest)
+                m['meaning_preserved'] = as_bit(m.get('meaning_preserved'), 'meaning_preserved')
+                if dest is None and m['meaning_preserved'] != 0:
+                    raise ValueError('missing target cannot preserve meaning')
+            added = r.get('added_target_ids', [])
+            if len(set(used)) != len(used) or len(set(added)) != len(added) or set(added) != set(range(len(task['translation_entities']))) - set(used):
+                raise ValueError('entity alignment must be one-to-one and complete')
+            out[r['i']] = r
+        return out
+    return _judge_batches(client, SYSTEM_ENTITIES, items, 'i', parse, {}, batch_size)

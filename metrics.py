@@ -89,12 +89,23 @@ def summarize(records: list, meta: dict) -> dict:
         "preservation": pooled_and_macro(records, lambda r: [i["preserved"] for i in _items(r)]),
         "preservation_all_masks": rate(_sec(r, "mentions").get("preservation") for r in records),
         "correctness": pooled_and_macro(records, lambda r: [i["correctness"] for i in _items(r)]),
-        "semantic_consistency": pooled_and_macro(records, lambda r: [i["semantic_consistency"] for i in _items(r)]),
-        "surface_consistency": pooled_and_macro(records, lambda r: [i["surface_consistency"] for i in _items(r)]),
-        "cell_text_in_question": pooled_and_macro(records, lambda r: [i["cell_text_in_question"] for i in _items(r)]),
+        "semantic_consistency": pooled_and_macro(records, lambda r: [i.get("semantic_consistency") for i in _items(r)]),
+        "surface_consistency": pooled_and_macro(records, lambda r: [i.get("surface_consistency") for i in _items(r)]),
+        "cell_text_in_question": pooled_and_macro(records, lambda r: [i.get("cell_text_in_question") for i in _items(r)]),
         "n_mentions": sum(len(_items(r)) for r in records),
     }
-    return {"meta": meta, "question": question, "table": table, "mentions": mentions,
+    entity_items = [it for r in records for it in (r.get('entities') or {}).get('items', [])]
+    matches = [m for it in entity_items for m in it['matches']]
+    entity_summary = {
+        'type_preservation': rate(m['type_preserved'] for m in matches),
+        'meaning_preservation': rate(m['meaning_preserved'] for m in matches),
+        'type_counts_equal': rate(it['type_counts']['equal'] for it in entity_items),
+        'n_source_entities': sum(len(it['source_entities']) for it in entity_items),
+        'n_translation_entities': sum(len(it['translation_entities']) for it in entity_items),
+        'n_unmatched_target_entities': sum(len(it['added_target_ids']) for it in entity_items),
+        'n_failed_pairs': sum(it['judgement_available'] is False for it in entity_items),
+        'n_pairs': len(entity_items)}
+    return {"entities": entity_summary, "meta": meta, "question": question, "table": table, "mentions": mentions,
             "diagnostics": _diagnostics(records)}
 
 
@@ -161,9 +172,18 @@ def format_report(s: dict) -> str:
     double("Preservation:", mm["preservation"])
     single("  all masks kept (example):", mm["preservation_all_masks"], "    ")
     double("Correctness:", mm["correctness"])
-    double("Semantic consistency:", mm["semantic_consistency"])
-    double("Surface consistency (diag.):", mm["surface_consistency"])
-    double("Cell text in question (diag.):", mm["cell_text_in_question"])
+    if not str(m.get("rubric_version", "")).startswith("v2."):
+        double("Semantic consistency:", mm["semantic_consistency"])
+    if not str(m.get("rubric_version", "")).startswith("v2."):
+        double("Surface consistency (diag.):", mm["surface_consistency"])
+    if not str(m.get("rubric_version", "")).startswith("v2."):
+        double("Cell text in question (diag.):", mm["cell_text_in_question"])
+    if 'entities' in s:
+        backend = 'Stanza OntoNotes' if m.get('entity_backend') == 'stanza-ontonotes' else 'Stanza + GLiNER'
+        L += ['', f'Named entities ({backend}; types compared by Python)']
+        for key in ('type_preservation', 'meaning_preservation', 'type_counts_equal'):
+            single(key + ':', s['entities'][key])
+        L.append(f"    Failed entity pairs: {s['entities']['n_failed_pairs']}")
     L += ["", "Pipeline diagnostics (NOT quality scores)"]
     for k, d in s["diagnostics"].items():
         L.append(f"    {k:<32} mean={d['mean']:.3f} median={d['median']:.3f} n={d['n']}")

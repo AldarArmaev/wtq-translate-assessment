@@ -33,9 +33,10 @@ class FakeClient:
             data = json.loads(user)
             res = []
             for m in data["mentions"]:
-                t = m["translated_table_text"]
-                span = t if t.casefold() in data["translated_question"].casefold() else ""
-                res.append({"id": m["id"], "span": span, "correctness": int(bool(span)),
+                t = m["translated_text"]
+                span = t
+                good = m["source_mention"] != "9,734"
+                res.append({"id": m["id"], "span": span, "correctness": int(good),
                             "semantic_consistency": int(bool(span)), "note": ""})
             obj = {"results": res}
         return parse(obj)
@@ -65,7 +66,8 @@ def build_dataset(root: Path):
 
     def mention(mask, text, stype, coords, src_text):
         return {"mask": mask, "question_text": text, "source_type": stype, "coordinates": coords,
-                "table_source_text": src_text, "coordinate": coords[0]}
+                "table_source_text": src_text, "coordinate": coords[0],
+                "translated_text": {"year": "году", "usl a-league": "USL А-лига", "9,734": "9,743"}[text]}
 
     quality_ok = {"original_masks": ["<TABLE_REF_0000>", "<TABLE_REF_0001>"],
                   "forward_masks": ["<TABLE_REF_0000>", "<TABLE_REF_0001>"],
@@ -114,7 +116,7 @@ def main():
         r0, r1 = recs["nt-0"], recs["nt-1"]
         assert r0["table"]["structure_preserved"] == 1 and r0["mentions"]["preservation"] == 1
         assert [i["correctness"] for i in r0["mentions"]["items"]] == [1, 1]
-        assert r0["mentions"]["items"][1]["surface_consistency"] == 1     # "USL А-лига" == table cell
+        assert r0["mentions"]["items"][1]["translated_text"] == "USL А-лига"
         assert r0["question"]["critical_error"] == 0
         assert r1["mentions"]["preservation"] == 0
         assert r1["mentions"]["items"][0]["correctness"] == 0             # corrupted number breaks the chain

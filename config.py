@@ -10,7 +10,7 @@ from typing import Optional
 # Bump this on ANY change to the prompts / rubric text in llm_judge.py.
 # rubric_lock.json stores the prompt hash per version and refuses to run if the prompts
 # changed without a version bump ("do not change metrics retroactively").
-RUBRIC_VERSION = "v1.0"
+RUBRIC_VERSION = "v2.1"
 
 DEFAULT_MODELS = {"anthropic": "claude-sonnet-5-5"}
 
@@ -36,16 +36,20 @@ class Config:
     sample_size: int = 200
     seed: int = 42
     workers: int = 4
-    max_cells: int = 150          # max cells judged per table (0 = no cap)
+    max_cells: int = 0          # max cells judged per table (0 = no cap)
     cell_batch_size: int = 40     # cells per LLM call
     use_llm: bool = True
     provider: str = "anthropic"   # anthropic | openai (any OpenAI-compatible endpoint)
     model: str = ""
     temperature: float = 0.0
     max_retries: int = 4
-    timeout: float = 120.0
+    timeout: float = 300.0
     tsv_quoting: str = "none"     # none | minimal  (how dataset/table TSVs are quoted)
     ids_file: Optional[Path] = None
+    entity_model_dir: Path = Path(".models")
+    entity_backend: str = 'gliner'
+    entity_scope: str = 'all'
+    entity_comparison: str = 'forward'
     resume: bool = False
     force: bool = False
 
